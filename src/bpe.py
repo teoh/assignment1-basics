@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import multiprocessing as mp
 import os
 from collections import Counter
 
 import regex as re
 
+from cs336_basics.pretokenization_example import find_chunk_boundaries
+
 END_OF_TEXT = "<|endoftext|>"
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+NUM_RESERVED_TOKENS = 256
+NUM_PROCESSES = 10
 
 def train_bpe(
     input_path: str | os.PathLike,
@@ -36,36 +41,25 @@ def train_bpe(
                 Merges are ordered by order of creation.
     """
     merges: list[tuple[bytes, bytes]] = []
-    vocab: dict[int, bytes] = {i: i.to_bytes() for i in range(256)}
-    vocab[256] = END_OF_TEXT.encode("utf-8")
-    num_vocab = 257
+    vocab: dict[int, bytes] = {i: i.to_bytes() for i in range(NUM_RESERVED_TOKENS)}
+    num_vocab = NUM_RESERVED_TOKENS
+    for special_token in special_tokens:
+        vocab[num_vocab] = special_token.encode("utf-8")
+        num_vocab += 1
     assert len(vocab) == num_vocab
 
     # pre-tokenize
-    # keeping this one for easy debugging
-    str_pretoken_counter: Counter[str] = Counter()
-    bytes_pretoken_counter: Counter[tuple[bytes, ...]] = Counter()
 
+    bytes_pretoken_counter = get_pretoken_counter(input_path)
     # use the regex to split the input text
-    with open(input_path) as f:
-        # print(re.findall(PAT, f.read()))
-        # import pytest; pytest.set_trace()
-        for pretoken in re.finditer(PAT, f.read()):
-            # import pytest; pytest.set_trace()
-            pretoken_str = pretoken.group(0).strip()
-            if pretoken_str:
-                str_pretoken_counter[pretoken_str] += 1
 
-        bytes_pretoken_counter = Counter({get_bytes_tuple(pretoken_str): ct for pretoken_str, ct in str_pretoken_counter.items()})
-
-    print(str_pretoken_counter)
-    print(bytes_pretoken_counter)
+    # print(bytes_pretoken_counter)
 
     # pair counting: we need some termination condition for this
-    while num_vocab < 263:
+    while num_vocab < vocab_size:
         # get the most frequent (and lexicographically largest) pair
         top_pair: tuple[bytes, bytes] = get_top_pair(bytes_pretoken_counter)
-        print(f"top pair: {top_pair}")
+        # print(f"top pair: {top_pair}")
 
         # in bytes_pretoken_counter, for pretokens that have this pair, merge those pairs
         # (will have to break open a tuple then reconstruct a tuple)
@@ -77,8 +71,8 @@ def train_bpe(
             bytes_pretoken_counter[new_bytes_pretoken] = ct
 
         merges.append(top_pair)
-        num_vocab += 1
         vocab[num_vocab] = b"".join(top_pair)
+        num_vocab += 1
 
     return (vocab, merges)
 
@@ -160,3 +154,63 @@ def merge(bytes_pretoken: tuple[bytes, ...], new_pair: tuple[bytes, bytes]) -> t
             new_bytes_list.append(bytes_pretoken[i])
             i += 1
     return tuple(new_bytes_list)
+
+def get_pretoken_counter(input_path: str | os.PathLike) -> Counter[tuple[bytes, ...]]:
+    """Extract pretoken counts from input file using parallel processing.
+
+    Splits the input file into chunks, processes each chunk in parallel to find
+    pretokens using regex pattern matching, and combines the results into a single
+    counter of byte-level pretokens.
+
+    Args:
+        input_path: Path to the input text file to process
+
+    Returns:
+        Counter[tuple[bytes, ...]]: A counter mapping byte pretoken tuples to their
+        frequencies across the entire input file
+    """
+
+    with open(input_path, "rb") as f:
+        boundaries = find_chunk_boundaries(f, NUM_PROCESSES, END_OF_TEXT.encode("utf-8"))
+        args = [(input_path, start, end) for start, end in zip(boundaries[:-1], boundaries[1:])]
+
+    with mp.Pool(NUM_PROCESSES) as pool:
+        all_pretoken_counters = pool.starmap(get_pretoken_counter_one_chunk, args)
+
+    final_counter: Counter[tuple[bytes, ...]] = Counter()
+    for pretoken_counter in all_pretoken_counters:
+        final_counter.update(pretoken_counter)
+    return final_counter
+
+def get_pretoken_counter_one_chunk(input_path: str | os.PathLike, start: int, end: int) -> Counter[tuple[bytes, ...]]:
+    """Process a single chunk of the input file to extract pretoken counts.
+
+    Reads a specific byte range from the input file, applies regex pattern matching
+    to find pretokens, and converts them to byte-level representations.
+
+    Args:
+        input_path: Path to the input text file to process
+        start: Starting byte position in the file
+        end: Ending byte position in the file (exclusive)
+
+    Returns:
+        Counter[tuple[bytes, ...]]: Counter of byte pretoken tuples found in this chunk
+    """
+    str_pretoken_counter: Counter[str] = Counter()
+    bytes_pretoken_counter: Counter[tuple[bytes, ...]] = Counter()
+
+    with open(input_path, "rb") as f:
+        f.seek(start)
+        raw_chunk = f.read(end - start).decode("utf-8", errors="ignore")
+        raw_chunk_split_by_eot = re.split(re.escape(END_OF_TEXT), raw_chunk)
+        chunk = "|".join(raw_chunk_split_by_eot)
+
+        # import pytest; pytest.set_trace()
+        for pretoken in re.finditer(PAT, chunk):
+            # import pytest; pytest.set_trace()
+            pretoken_str = pretoken.group(0)
+            if pretoken_str:
+                str_pretoken_counter[pretoken_str] += 1
+
+        bytes_pretoken_counter = Counter({get_bytes_tuple(pretoken_str): ct for pretoken_str, ct in str_pretoken_counter.items()})
+    return bytes_pretoken_counter
