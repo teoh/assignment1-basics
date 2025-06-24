@@ -6,7 +6,7 @@ from collections import Counter
 
 import regex as re
 
-from cs336_basics.pretokenization_example import find_chunk_boundaries
+from .pretokenization_example import find_chunk_boundaries
 
 END_OF_TEXT = "<|endoftext|>"
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
