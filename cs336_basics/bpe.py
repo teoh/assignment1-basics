@@ -58,7 +58,8 @@ def train_bpe(
     # pair counting: we need some termination condition for this
     while num_vocab < vocab_size:
         # get the most frequent (and lexicographically largest) pair
-        top_pair: tuple[bytes, bytes] = get_top_pair(bytes_pretoken_counter)
+        byte_pair_cts = count_byte_pairs(bytes_pretoken_counter)
+        top_pair: tuple[bytes, bytes] = get_top_pair(byte_pair_cts)
         # print(f"top pair: {top_pair}")
 
         # in bytes_pretoken_counter, for pretokens that have this pair, merge those pairs
@@ -100,15 +101,18 @@ def get_bytes_tuple(input_str: str) -> tuple[bytes, ...]:
     # when you unpack a bytes object you get list of ints. we have to convert back manually to bytes
     return tuple(map(lambda i: i.to_bytes(), utf8_encoded))
 
-def get_top_pair(bytes_pretoken_counter: Counter[tuple[bytes, ...]]) -> tuple[bytes, bytes]:
-    """Find the most frequently occurring pair of consecutive bytes in the pretokens.
+def count_byte_pairs(bytes_pretoken_counter: Counter[tuple[bytes, ...]]) -> Counter[tuple[bytes, bytes]]:
+    """Count all consecutive byte pairs in pretokens.
+
+    Analyzes each pretoken in the counter and counts how frequently each consecutive
+    pair of bytes occurs across all pretokens, weighted by their frequencies.
 
     Args:
         bytes_pretoken_counter: Counter mapping byte sequences (as tuples) to their frequencies
 
     Returns:
-        tuple[bytes, bytes]: The most frequent pair of consecutive bytes. In case of ties,
-        returns the lexicographically largest pair.
+        Counter[tuple[bytes, bytes]]: Counter mapping consecutive byte pairs to their
+        total occurrence frequencies across all pretokens
     """
     byte_pair_cts: Counter[tuple[bytes, bytes]] = Counter()
 
@@ -118,6 +122,22 @@ def get_top_pair(bytes_pretoken_counter: Counter[tuple[bytes, ...]]) -> tuple[by
         for left_idx in range(len(bytes_pretoken) - 1):
             byte_pair: tuple[bytes, bytes] = (bytes_pretoken[left_idx], bytes_pretoken[left_idx + 1])
             byte_pair_cts[byte_pair] += ct
+
+    return byte_pair_cts
+
+def get_top_pair(byte_pair_cts: Counter[tuple[bytes, bytes]]) -> tuple[bytes, bytes]:
+    """Find the most frequently occurring pair of consecutive bytes in the pretokens.
+
+    Identifies the byte pair with the highest frequency count. In case of ties,
+    returns the lexicographically largest pair (using byte-wise comparison).
+
+    Args:
+        byte_pair_cts: Counter mapping consecutive byte pairs to their frequencies
+
+    Returns:
+        tuple[bytes, bytes]: The most frequent pair of consecutive bytes. In case of ties,
+        returns the lexicographically largest pair.
+    """
 
     # get the most freq occuring one. if tie, lexicographically larger
     most_freq_bp: tuple[bytes, bytes] = (b"a", b"b")
