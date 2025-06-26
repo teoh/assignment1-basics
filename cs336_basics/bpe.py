@@ -40,6 +40,14 @@ def train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
+    # BPE Algorithm Overview:
+    # 1. Initialize vocab with reserved tokens (0-255) and special tokens
+    # 2. Pre-tokenize input text into byte sequences
+    # 3. Iteratively find most frequent byte pair and merge it
+    # 4. Update data structures incrementally for efficiency
+    # 5. Continue until target vocab size is reached
+
+    # === INITIALIZATION ===
     merges: list[tuple[bytes, bytes]] = []
     vocab: dict[int, bytes] = {i: i.to_bytes() for i in range(NUM_RESERVED_TOKENS)}
     num_vocab = NUM_RESERVED_TOKENS
@@ -48,33 +56,35 @@ def train_bpe(
         num_vocab += 1
     assert len(vocab) == num_vocab
 
-    # pre-tokenize
-
+    # === PRE-TOKENIZATION ===
     bytes_pretoken_counter = get_pretoken_counter(input_path)
 
-    # convert to a format that's easier to work with for caching counts
+    # === DATA STRUCTURE CONVERSION FOR EFFICIENCY ===
+    # Convert to indexed format to enable incremental updates during merging
+    # Using indexed approach allows O(1) updates instead of O(n) dictionary rebuilding
     idx_to_count: Counter[int] = Counter({idx: count for idx, count in enumerate(bytes_pretoken_counter.values())})
     idx_to_pretoken: dict[int, tuple[bytes, ...]] = {idx: pretoken for idx, pretoken in enumerate(bytes_pretoken_counter.keys())}
     bytes_pair_to_count, bytes_pair_to_idxs = count_byte_pairs(idx_to_count, idx_to_pretoken)
-    # use the regex to split the input text
 
-    # print(bytes_pretoken_counter)
-    # import pytest; pytest.set_trace()
-
-    # pair counting: we need some termination condition for this
+    # === MAIN BPE TRAINING LOOP ===
     while num_vocab < vocab_size:
         # get the most frequent (and lexicographically largest) pair
         top_pair: tuple[bytes, bytes] = get_top_pair(bytes_pair_to_count)
         top_pair_bytes: bytes = b"".join(top_pair)
 
-        # remove this pair from the pair counts. it is now its own unit
+        # Remove this pair from the pair counts as it's now its own unit
+        # Note: Only update pretokens that actually contain this pair (tracked in bytes_pair_to_idxs)
+        # This avoids O(n) iteration over all pretokens
         pretoken_idxs_with_top_pair = bytes_pair_to_idxs[top_pair]
         del bytes_pair_to_count[top_pair]
         del bytes_pair_to_idxs[top_pair]
 
         for pretoken_idx in pretoken_idxs_with_top_pair:
-            # for each pretoken that contained the top pair:
-            # merge, and incrementally update counts of pairs
+            # INCREMENTAL PAIR COUNT UPDATES:
+            # When merging X,Y -> XY in sequence A,X,Y,B -> A,XY,B
+            # Remove old pairs: (A,X), (Y,B)
+            # Add new pairs: (A,XY), (XY,B)
+            # This maintains correct pair counts without full recomputation
             pretoken_bytes: tuple[bytes, ...] = idx_to_pretoken[pretoken_idx]
             pretoken_ct = idx_to_count[pretoken_idx]
             new_bytes_list = []
@@ -108,26 +118,10 @@ def train_bpe(
                 else:
                     new_bytes_list.append(pretoken_bytes[i])
                     i += 1
+            # Update the pretoken with its merged version
             idx_to_pretoken[pretoken_idx] = tuple(new_bytes_list)
 
-        # do the merge step: for pretokens (i.e. bytes tuples) that contain this
-        # new pair, perform the merge operation
-        # e.g. you merged bytes (X, Y) -> now is XY
-        # while in merge step, you encounter A, X, Y, B. your merge is now A, XY, B.
-        # decrement pairs (A, X) and (Y, B), increment pairs (A, XY), (XY, B)
-
-        # old
-        # # print(f"top pair: {top_pair}")
-
-        # # in bytes_pretoken_counter, for pretokens that have this pair, merge those pairs
-        # # (will have to break open a tuple then reconstruct a tuple)
-        # current_pretokens: list[tuple[bytes, ...]] = list(bytes_pretoken_counter.keys())
-        # for bytes_pretoken in current_pretokens:
-        #     ct = bytes_pretoken_counter[bytes_pretoken]
-        #     new_bytes_pretoken = merge(bytes_pretoken, top_pair)
-        #     del bytes_pretoken_counter[bytes_pretoken]
-        #     bytes_pretoken_counter[new_bytes_pretoken] = ct
-
+        # Add the merge to our results
         merges.append(top_pair)
         vocab[num_vocab] = top_pair_bytes
         num_vocab += 1
