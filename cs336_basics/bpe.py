@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import os
-from collections import Counter
+from collections import Counter, defaultdict
 
 import regex as re
 
@@ -51,28 +51,85 @@ def train_bpe(
     # pre-tokenize
 
     bytes_pretoken_counter = get_pretoken_counter(input_path)
+
+    # convert to a format that's easier to work with for caching counts
+    idx_to_count: Counter[int] = Counter({idx: count for idx, count in enumerate(bytes_pretoken_counter.values())})
+    idx_to_pretoken: dict[int, tuple[bytes, ...]] = {idx: pretoken for idx, pretoken in enumerate(bytes_pretoken_counter.keys())}
+    bytes_pair_to_count, bytes_pair_to_idxs = count_byte_pairs(idx_to_count, idx_to_pretoken)
     # use the regex to split the input text
 
     # print(bytes_pretoken_counter)
+    # import pytest; pytest.set_trace()
 
     # pair counting: we need some termination condition for this
     while num_vocab < vocab_size:
         # get the most frequent (and lexicographically largest) pair
-        byte_pair_cts = count_byte_pairs(bytes_pretoken_counter)
-        top_pair: tuple[bytes, bytes] = get_top_pair(byte_pair_cts)
-        # print(f"top pair: {top_pair}")
+        top_pair: tuple[bytes, bytes] = get_top_pair(bytes_pair_to_count)
+        top_pair_bytes: bytes = b"".join(top_pair)
 
-        # in bytes_pretoken_counter, for pretokens that have this pair, merge those pairs
-        # (will have to break open a tuple then reconstruct a tuple)
-        current_pretokens: list[tuple[bytes, ...]] = list(bytes_pretoken_counter.keys())
-        for bytes_pretoken in current_pretokens:
-            ct = bytes_pretoken_counter[bytes_pretoken]
-            new_bytes_pretoken = merge(bytes_pretoken, top_pair)
-            del bytes_pretoken_counter[bytes_pretoken]
-            bytes_pretoken_counter[new_bytes_pretoken] = ct
+        # remove this pair from the pair counts. it is now its own unit
+        pretoken_idxs_with_top_pair = bytes_pair_to_idxs[top_pair]
+        del bytes_pair_to_count[top_pair]
+        del bytes_pair_to_idxs[top_pair]
+
+        for pretoken_idx in pretoken_idxs_with_top_pair:
+            # for each pretoken that contained the top pair:
+            # merge, and incrementally update counts of pairs
+            pretoken_bytes: tuple[bytes, ...] = idx_to_pretoken[pretoken_idx]
+            pretoken_ct = idx_to_count[pretoken_idx]
+            new_bytes_list = []
+            i = 0
+            while i < len(pretoken_bytes):
+                # found the pair in the seq: do the merge
+                if i + 1 < len(pretoken_bytes) and (pretoken_bytes[i], pretoken_bytes[i+1]) == top_pair:
+                    # imagine your top pair is (X, Y), sequence looks like: A, X, Y, B
+                    # then merge results is A, XY, B
+                    # we need to decrement counts of pairs: (A, X), (Y, B)
+                    # and increment counts of: (A, XY), (XY, B)
+                    new_bytes_list.append(top_pair_bytes)
+
+                    # check left side of the pair
+                    if i > 0:
+                        # decrement (A, X)
+                        bytes_pair_to_count[(pretoken_bytes[i-1], pretoken_bytes[i])] -= pretoken_ct
+                        # increment (A, XY)
+                        bytes_pair_to_count[(pretoken_bytes[i-1], top_pair_bytes)] += pretoken_ct
+                        bytes_pair_to_idxs[(pretoken_bytes[i-1], top_pair_bytes)].add(pretoken_idx)
+
+                    # check right side of the pair
+                    if i + 2 < len(pretoken_bytes):
+                        # decrement (Y, B)
+                        bytes_pair_to_count[(pretoken_bytes[i+1], pretoken_bytes[i+2])] -= pretoken_ct
+                        # increment (XY, B)
+                        bytes_pair_to_count[(top_pair_bytes, pretoken_bytes[i+2])] += pretoken_ct
+                        bytes_pair_to_idxs[(top_pair_bytes, pretoken_bytes[i+2])].add(pretoken_idx)
+
+                    i += 2
+                else:
+                    new_bytes_list.append(pretoken_bytes[i])
+                    i += 1
+            idx_to_pretoken[pretoken_idx] = tuple(new_bytes_list)
+
+        # do the merge step: for pretokens (i.e. bytes tuples) that contain this
+        # new pair, perform the merge operation
+        # e.g. you merged bytes (X, Y) -> now is XY
+        # while in merge step, you encounter A, X, Y, B. your merge is now A, XY, B.
+        # decrement pairs (A, X) and (Y, B), increment pairs (A, XY), (XY, B)
+
+        # old
+        # # print(f"top pair: {top_pair}")
+
+        # # in bytes_pretoken_counter, for pretokens that have this pair, merge those pairs
+        # # (will have to break open a tuple then reconstruct a tuple)
+        # current_pretokens: list[tuple[bytes, ...]] = list(bytes_pretoken_counter.keys())
+        # for bytes_pretoken in current_pretokens:
+        #     ct = bytes_pretoken_counter[bytes_pretoken]
+        #     new_bytes_pretoken = merge(bytes_pretoken, top_pair)
+        #     del bytes_pretoken_counter[bytes_pretoken]
+        #     bytes_pretoken_counter[new_bytes_pretoken] = ct
 
         merges.append(top_pair)
-        vocab[num_vocab] = b"".join(top_pair)
+        vocab[num_vocab] = top_pair_bytes
         num_vocab += 1
 
     return (vocab, merges)
@@ -101,29 +158,35 @@ def get_bytes_tuple(input_str: str) -> tuple[bytes, ...]:
     # when you unpack a bytes object you get list of ints. we have to convert back manually to bytes
     return tuple(map(lambda i: i.to_bytes(), utf8_encoded))
 
-def count_byte_pairs(bytes_pretoken_counter: Counter[tuple[bytes, ...]]) -> Counter[tuple[bytes, bytes]]:
-    """Count all consecutive byte pairs in pretokens.
+def count_byte_pairs(idx_to_count: Counter[int], idx_to_pretoken: dict[int, tuple[bytes, ...]]) -> tuple[Counter[tuple[bytes, bytes]], dict[tuple[bytes, bytes], set[int]]]:
+    """Count all consecutive byte pairs in pretokens and track which pretokens contain each pair.
 
-    Analyzes each pretoken in the counter and counts how frequently each consecutive
-    pair of bytes occurs across all pretokens, weighted by their frequencies.
+    Analyzes each pretoken and counts how frequently each consecutive pair of bytes
+    occurs across all pretokens, weighted by their frequencies. Also tracks which
+    pretoken indices contain each byte pair for efficient updates during merging.
 
     Args:
-        bytes_pretoken_counter: Counter mapping byte sequences (as tuples) to their frequencies
+        idx_to_count: Counter mapping pretoken indices to their occurrence counts
+        idx_to_pretoken: Dictionary mapping pretoken indices to their byte sequences
 
     Returns:
-        Counter[tuple[bytes, bytes]]: Counter mapping consecutive byte pairs to their
-        total occurrence frequencies across all pretokens
+        tuple[Counter[tuple[bytes, bytes]], dict[tuple[bytes, bytes], set[int]]]:
+            bytes_pair_to_count: Counter mapping consecutive byte pairs to their total frequencies
+            bytes_pair_to_idxs: Dictionary mapping byte pairs to sets of pretoken indices that contain them
     """
-    byte_pair_cts: Counter[tuple[bytes, bytes]] = Counter()
+    bytes_pair_to_count: Counter[tuple[bytes, bytes]] = Counter()
+    bytes_pair_to_idxs: dict[tuple[bytes, bytes], set[int]] = defaultdict(set)
 
     # count pairs of bytes
-    for bytes_pretoken, ct in bytes_pretoken_counter.items():
+    for idx, bytes_pretoken in idx_to_pretoken.items():
+        ct = idx_to_count[idx]
         # for each bytes pretoken traverse the sequence, and update pair_cts accordingly
         for left_idx in range(len(bytes_pretoken) - 1):
             byte_pair: tuple[bytes, bytes] = (bytes_pretoken[left_idx], bytes_pretoken[left_idx + 1])
-            byte_pair_cts[byte_pair] += ct
+            bytes_pair_to_count[byte_pair] += ct
+            bytes_pair_to_idxs[byte_pair].add(idx)
 
-    return byte_pair_cts
+    return bytes_pair_to_count, bytes_pair_to_idxs
 
 def get_top_pair(byte_pair_cts: Counter[tuple[bytes, bytes]]) -> tuple[bytes, bytes]:
     """Find the most frequently occurring pair of consecutive bytes in the pretokens.
