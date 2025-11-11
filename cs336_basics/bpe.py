@@ -280,14 +280,11 @@ def get_pretoken_counter_one_chunk(input_path: str | os.PathLike, start: int, en
         f.seek(start)
         raw_chunk = f.read(end - start).decode("utf-8", errors="ignore")
         raw_chunk_split_by_eot = re.split(re.escape(END_OF_TEXT), raw_chunk)
-        chunk = "|".join(raw_chunk_split_by_eot)
-
-        # import pytest; pytest.set_trace()
-        for pretoken in re.finditer(PAT, chunk):
-            # import pytest; pytest.set_trace()
-            pretoken_str = pretoken.group(0)
-            if pretoken_str:
-                str_pretoken_counter[pretoken_str] += 1
+        for subchunk in raw_chunk_split_by_eot:
+            for pretoken in re.finditer(PAT, subchunk):
+                pretoken_str = pretoken.group(0)
+                if pretoken_str:
+                    str_pretoken_counter[pretoken_str] += 1
 
         bytes_pretoken_counter = Counter({get_bytes_tuple(pretoken_str): ct for pretoken_str, ct in str_pretoken_counter.items()})
     return bytes_pretoken_counter
