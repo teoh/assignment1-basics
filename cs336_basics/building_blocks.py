@@ -1,8 +1,7 @@
 import math
 
+import einx
 import torch
-
-# import torch.nn as nn
 from torch import nn
 
 
@@ -25,3 +24,39 @@ class Embedding(nn.Module):
 
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
         return self.embeds[token_ids]
+
+
+class RMSNorm(nn.Module):
+    def __init__(self, d_model: int, eps: float = 1e-5, device=None, dtype=None):
+        super().__init__()
+        self.d_model = d_model
+        self.eps = eps
+
+        self.gain = nn.Parameter(torch.ones(d_model))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        in_dtype = x.dtype
+        x = x.to(torch.float32)
+        x_times_x = einx.dot("... d_model, ... d_model -> ... c", x, x, c=1)
+        rms = torch.sqrt(x_times_x / self.d_model + self.eps)
+        result = x * self.gain / rms
+
+        return result.to(in_dtype)
+
+
+class SwiGLU(nn.Module):
+    def __init__(self, d_model: int, d_ff: int):
+        super().__init__()
+        self.d_model = d_model
+        self.d_ff = d_ff
+
+        self.w1 = Linear(self.d_model, self.d_ff)
+        self.w2 = Linear(self.d_ff, self.d_model)
+        self.w3 = Linear(self.d_model, self.d_ff)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.w2(silu(self.w1(x)) * self.w3(x))
+
+
+def silu(x: torch.Tensor) -> torch.Tensor:
+    return torch.sigmoid(x) * x

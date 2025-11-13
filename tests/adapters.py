@@ -10,7 +10,7 @@ from jaxtyping import Float, Int
 from torch import Tensor
 
 from cs336_basics.bpe import train_bpe
-from cs336_basics.building_blocks import Embedding, Linear
+from cs336_basics.building_blocks import Embedding, Linear, RMSNorm, SwiGLU
 
 
 def run_linear(
@@ -89,7 +89,9 @@ def run_swiglu(
     # swiglu.w1.weight.data = w1_weight
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
-    raise NotImplementedError
+    swiglu = SwiGLU(d_model, d_ff)
+    swiglu.load_state_dict({"w1.W": w1_weight, "w2.W": w2_weight, "w3.W": w3_weight})
+    return swiglu(in_features)
 
 
 def run_scaled_dot_product_attention(
@@ -384,7 +386,9 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    raise NotImplementedError
+    rmsnorm = RMSNorm(d_model, eps)
+    rmsnorm.load_state_dict({"gain": weights})
+    return rmsnorm(in_features)
 
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
