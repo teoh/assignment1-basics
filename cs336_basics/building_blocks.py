@@ -2,6 +2,7 @@ import math
 
 import einx
 import torch
+from einops import rearrange
 from torch import nn
 
 
@@ -60,3 +61,28 @@ class SwiGLU(nn.Module):
 
 def silu(x: torch.Tensor) -> torch.Tensor:
     return torch.sigmoid(x) * x
+
+
+class Rope(nn.Module):
+    def __init__(self, theta: float, d_k: int, max_seq_len: int, device=None):
+        super().__init__()
+        i_vec = torch.arange(max_seq_len, dtype=torch.float32)
+        k_vec = torch.arange(d_k // 2, dtype=torch.float32)
+        denom = torch.float_power(theta, -2.0 * k_vec / d_k)
+        thetas = torch.outer(i_vec, denom)
+
+        # shape: (max_seq_len, d_k//2)
+        self.register_buffer("sin_thetas", torch.sin(thetas))
+        self.register_buffer("cos_thetas", torch.cos(thetas))
+
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
+        # shape: (..., seq_len, d_k) ->
+        x_split = rearrange(x, "... seq_len (k two) -> ... seq_len k two", two=2)
+        top, bottom = x_split[..., 0], x_split[..., 1]
+
+        sin_values, cos_values = self.sin_thetas[token_positions, :], self.cos_thetas[token_positions, :]
+        x_prime_top = top * cos_values - bottom * sin_values
+        x_prime_bottom = top * sin_values + bottom * cos_values
+
+        x_prime = torch.stack((x_prime_top, x_prime_bottom), dim=-1)
+        return rearrange(x_prime, "... seq_len k two -> ... seq_len (k two)", two=2)
