@@ -86,3 +86,9 @@ class Rope(nn.Module):
 
         x_prime = torch.stack((x_prime_top, x_prime_bottom), dim=-1)
         return rearrange(x_prime, "... seq_len k two -> ... seq_len (k two)", two=2)
+
+
+def softmax(x: torch.Tensor, dim: int) -> torch.Tensor:
+    max_vals, _ = torch.max(x, dim, keepdim=True)
+    shifted = x - max_vals
+    return torch.exp(shifted) / torch.sum(torch.exp(shifted), dim, keepdim=True)
